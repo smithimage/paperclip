@@ -1077,14 +1077,23 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
       if (input.monitorExplicitlyUpdated) {
         throw unprocessable(MONITOR_INVALID_MESSAGE);
       }
-      patch.executionPolicy = stripMonitorFromExecutionPolicy(input.policy);
-      patch.monitorNextCheckAt = null;
-      patch.monitorWakeRequestedAt = null;
-      targetMonitorState = buildClearedMonitorState({
-        previous: currentMonitorState,
-        clearReason: invalidReason,
-        clearedAt: new Date(),
-      });
+      // Preserve the monitor when a real board handoff (PATCH sets assigneeUserId + clears
+      // assigneeAgentId) lands on an active issue. The monitor is dormant while
+      // assigneeAgentId is null — heartbeat.js requires non-null agentId — and fires on the
+      // first sweep tick after re-assignment. Wake target: the assigneeAgentId at fire time.
+      const isBoardHandoff =
+        invalidReason === "invalid_assignee" &&
+        (nextStatus === "in_progress" || nextStatus === "in_review");
+      if (!isBoardHandoff) {
+        patch.executionPolicy = stripMonitorFromExecutionPolicy(input.policy);
+        patch.monitorNextCheckAt = null;
+        patch.monitorWakeRequestedAt = null;
+        targetMonitorState = buildClearedMonitorState({
+          previous: currentMonitorState,
+          clearReason: invalidReason,
+          clearedAt: new Date(),
+        });
+      }
     } else {
       const exhaustedReason = exhaustedMonitorClearReason({
         monitor: input.policy.monitor,
