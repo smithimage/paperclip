@@ -1760,6 +1760,118 @@ describe("issue execution policy transitions", () => {
       ).toThrow("Monitor can only be scheduled");
     });
 
+    // AC1 — regression guard: bare assigneeAgentId:null (no user assignee) preserves monitor
+    it("preserves monitor when bare assigneeAgentId:null PATCH leaves no user assignee", () => {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [],
+        monitor: {
+          nextCheckAt: "2026-04-11T12:30:00.000Z",
+          notes: "Check after handoff",
+          scheduledBy: "assignee",
+        },
+      })!;
+
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: null,
+          monitorAttemptCount: 0,
+          monitorNextCheckAt: new Date("2026-04-11T12:30:00.000Z"),
+          monitorLastTriggeredAt: null,
+          monitorNotes: "Check after handoff",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy: policy,
+        requestedAssigneePatch: { assigneeAgentId: null },
+        actor: { agentId: coderAgentId },
+      });
+
+      // executionPolicy must NOT be cleared (undefined = DB retains existing value)
+      expect(result.patch.executionPolicy).toBeUndefined();
+      // monitorNextCheckAt must NOT be nulled
+      expect(result.patch.monitorNextCheckAt).toBeUndefined();
+    });
+
+    // AC2 — actual fix: a real board handoff (assigneeUserId set + status in_review) preserves monitor
+    it("preserves monitor through a real board handoff PATCH", () => {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [],
+        monitor: {
+          nextCheckAt: "2026-04-11T12:30:00.000Z",
+          notes: "Check deployment",
+          scheduledBy: "assignee",
+        },
+      })!;
+
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_progress",
+          assigneeAgentId: coderAgentId,
+          assigneeUserId: null,
+          executionPolicy: policy,
+          executionState: null,
+          monitorAttemptCount: 0,
+          monitorNextCheckAt: new Date("2026-04-11T12:30:00.000Z"),
+          monitorLastTriggeredAt: null,
+          monitorNotes: "Check deployment",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy: policy,
+        // Real board handoff: set user assignee, clear agent assignee, move to in_review
+        requestedAssigneePatch: { assigneeAgentId: null, assigneeUserId: boardUserId },
+        requestedStatus: "in_review",
+        actor: { userId: boardUserId },
+      });
+
+      // Monitor must be preserved — executionPolicy and monitorNextCheckAt must not be cleared
+      expect(result.patch.executionPolicy).toBeUndefined();
+      expect(result.patch.monitorNextCheckAt).toBeUndefined();
+    });
+
+    // AC3 positive control: after re-assigning an agent the monitor becomes active again
+    it("re-schedules monitor after agent re-assignment following a board handoff", () => {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [],
+        monitor: {
+          nextCheckAt: "2026-04-11T12:30:00.000Z",
+          notes: "Check deployment",
+          scheduledBy: "assignee",
+        },
+      })!;
+
+      // Simulate the post-handoff DB state: monitor preserved, user assignee set
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: null,
+          assigneeUserId: boardUserId,
+          executionPolicy: policy,
+          executionState: null,
+          monitorAttemptCount: 0,
+          monitorNextCheckAt: new Date("2026-04-11T12:30:00.000Z"),
+          monitorLastTriggeredAt: null,
+          monitorNotes: "Check deployment",
+          monitorScheduledBy: "assignee",
+        },
+        policy,
+        previousPolicy: policy,
+        // Agent re-assignment: agent picks up the issue, user assignee cleared
+        requestedAssigneePatch: { assigneeAgentId: coderAgentId, assigneeUserId: null },
+        requestedStatus: "in_progress",
+        actor: { userId: boardUserId },
+      });
+
+      // After re-assignment, issueAllowsMonitor returns true → scheduling path runs
+      expect(result.patch.monitorNextCheckAt).toEqual(new Date("2026-04-11T12:30:00.000Z"));
+      // Policy is not stripped
+      expect(result.patch.executionPolicy).toBeUndefined();
+    });
+
     it("rejects explicitly re-arming a monitor after max attempts are exhausted", () => {
       const policy = normalizeIssueExecutionPolicy({
         stages: [],
