@@ -228,7 +228,7 @@ import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
-import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, recoveryService } from "./recovery/service.js";
+import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS, recoveryService } from "./recovery/service.js";
 import {
   buildIssueReviewPathLostIdempotencyKey,
   decideIssueReviewPathRecovery,
@@ -11002,6 +11002,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    // When the error family is provider_quota and no specific future reset time is
+    // known, the standard transient-failure delays (2 min / 10 min / 30 min / 2 hr)
+    // are far too short: a closed quota window typically lasts hours or days.  Apply
+    // PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS as a floor so that each retry waits
+    // at least as long as the recovery service's own default.  A concrete
+    // retryNotBefore (set by the adapter when the provider supplies a reset time)
+    // overrides the floor in the normal comparison below.
+    const providerQuotaFloorDueAt =
+      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON &&
+      transientRecovery?.errorFamily === "provider_quota" &&
+      (transientRetryNotBefore === null || transientRetryNotBefore.getTime() <= now.getTime())
+        ? new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS)
+        : null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
 
@@ -11063,14 +11076,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    const schedule =
-      transientRetryNotBefore && transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
-        ? {
-            ...baseSchedule,
-            dueAt: transientRetryNotBefore,
-            delayMs: Math.max(0, transientRetryNotBefore.getTime() - now.getTime()),
-          }
-        : baseSchedule;
+    const schedule = (() => {
+      if (transientRetryNotBefore && transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()) {
+        return {
+          ...baseSchedule,
+          dueAt: transientRetryNotBefore,
+          delayMs: Math.max(0, transientRetryNotBefore.getTime() - now.getTime()),
+        };
+      }
+      if (providerQuotaFloorDueAt && providerQuotaFloorDueAt.getTime() > baseSchedule.dueAt.getTime()) {
+        return {
+          ...baseSchedule,
+          dueAt: providerQuotaFloorDueAt,
+          delayMs: PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
+        };
+      }
+      return baseSchedule;
+    })();
 
     const requiresIssueGate =
       retryReason === MAX_TURN_CONTINUATION_RETRY_REASON ||
