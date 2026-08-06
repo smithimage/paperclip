@@ -230,6 +230,7 @@ export function activityRoutes(db: Db) {
       entityType: req.query.entityType as string | undefined,
       entityId: req.query.entityId as string | undefined,
       limit: normalizeActivityLimit(Number(req.query.limit)),
+      cursor: req.query.cursor as string | undefined,
     };
     const result = await svc.list(filters);
     res.json(result);

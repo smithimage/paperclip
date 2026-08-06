@@ -114,7 +114,9 @@ describeEmbeddedPostgres("activity service", () => {
 
     const result = await activityService(db).list({ companyId, limit: 2 });
 
-    expect(result.map((event) => event.action)).toEqual(["test.newest", "test.middle"]);
+    expect(result.items.map((event) => event.action)).toEqual(["test.newest", "test.middle"]);
+    expect(result.hasMore).toBe(true);
+    expect(typeof result.nextCursor).toBe("string");
   });
 
   it("returns compact usage and result summaries for issue runs", async () => {

@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -25,6 +26,28 @@ export interface ActivityFilters {
   entityType?: string;
   entityId?: string;
   limit?: number;
+  cursor?: string;
+}
+
+type ActivityCursor = { createdAt: string; id: string };
+
+const activityCursorSchema = z.object({
+  createdAt: z.string().datetime({ offset: true }),
+  id: z.string().uuid(),
+});
+
+function decodeActivityCursor(cursor: string | undefined): ActivityCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed = activityCursorSchema.safeParse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeActivityCursor(value: ActivityCursor) {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
 
 const DEFAULT_ACTIVITY_LIMIT = 100;
@@ -326,7 +349,8 @@ export function activityService(db: Db) {
   }
 
   return {
-    list: (filters: ActivityFilters) => {
+    list: async (filters: ActivityFilters) => {
+      const cursor = decodeActivityCursor(filters.cursor);
       const conditions = [eq(activityLog.companyId, filters.companyId)];
       const limit = normalizeActivityLimit(filters.limit);
 
@@ -339,9 +363,21 @@ export function activityService(db: Db) {
       if (filters.entityId) {
         conditions.push(eq(activityLog.entityId, filters.entityId));
       }
+      if (cursor) {
+        conditions.push(or(
+          sql<boolean>`${activityLog.createdAt} < ${cursor.createdAt}::timestamptz`,
+          and(
+            sql<boolean>`${activityLog.createdAt} = ${cursor.createdAt}::timestamptz`,
+            lt(activityLog.id, cursor.id),
+          ),
+        )!);
+      }
 
-      return db
-        .select({ activityLog })
+      const rows = await db
+        .select({
+          activityLog,
+          cursorCreatedAt: sql<string>`to_char(${activityLog.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as("cursor_created_at"),
+        })
         .from(activityLog)
         .leftJoin(
           issues,
@@ -359,9 +395,19 @@ export function activityService(db: Db) {
             ),
           ),
         )
-        .orderBy(desc(activityLog.createdAt))
-        .limit(limit)
-        .then((rows) => rows.map((r) => r.activityLog));
+        .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+        .limit(limit + 1);
+
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        items: page.map((r) => r.activityLog),
+        nextCursor: hasMore && last
+          ? encodeActivityCursor({ createdAt: last.cursorCreatedAt, id: last.activityLog.id })
+          : null,
+        hasMore,
+      };
     },
 
     forIssue: (issueId: string) =>

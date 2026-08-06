@@ -207,7 +207,7 @@ describe.sequential("activity routes", () => {
   });
 
   it("limits company activity lists by default", async () => {
-    mockActivityService.list.mockResolvedValue([]);
+    mockActivityService.list.mockResolvedValue({ items: [], nextCursor: null, hasMore: false });
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/companies/company-1/activity"));
@@ -219,11 +219,12 @@ describe.sequential("activity routes", () => {
       entityType: undefined,
       entityId: undefined,
       limit: 100,
+      cursor: undefined,
     });
   });
 
   it("caps requested company activity list limits", async () => {
-    mockActivityService.list.mockResolvedValue([]);
+    mockActivityService.list.mockResolvedValue({ items: [], nextCursor: null, hasMore: false });
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) =>
@@ -237,7 +238,42 @@ describe.sequential("activity routes", () => {
       entityType: "issue",
       entityId: undefined,
       limit: 500,
+      cursor: undefined,
     });
+  });
+
+  it("forwards cursor to activity list service", async () => {
+    const fakeCursor = "eyJjcmVhdGVkQXQiOiIyMDI2LTA3LTMxVDAwOjAwOjAwLjAwMDAwMFoiLCJpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMSJ9";
+    mockActivityService.list.mockResolvedValue({ items: [], nextCursor: null, hasMore: false });
+
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get(`/api/companies/company-1/activity?cursor=${fakeCursor}`),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockActivityService.list).toHaveBeenCalledWith(expect.objectContaining({
+      cursor: fakeCursor,
+    }));
+  });
+
+  it("returns pagination envelope with nextCursor and hasMore", async () => {
+    const nextCursor = "someOpaqueToken";
+    mockActivityService.list.mockResolvedValue({
+      items: [{ id: "event-1", action: "issue.created" }],
+      nextCursor,
+      hasMore: true,
+    });
+
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/companies/company-1/activity?limit=1"),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.nextCursor).toBe(nextCursor);
+    expect(res.body.hasMore).toBe(true);
+    expect(res.body.items).toHaveLength(1);
   });
 
   it("resolves alphanumeric issue identifiers before loading runs", async () => {
