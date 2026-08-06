@@ -219,17 +219,29 @@ export function activityRoutes(db: Db) {
     return issueSvc.getById(rawId);
   }
 
+  const activityQuerySchema = z.object({
+    agentId: z.string().optional(),
+    entityType: z.string().optional(),
+    entityId: z.string().optional(),
+    limit: z.coerce.number().optional(),
+  }).strict();
+
   router.get("/companies/:companyId/activity", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertCompanyScopeReadAllowed(req, res, companyId))) return;
 
+    const parsed = activityQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw badRequest("Unknown query parameters", parsed.error.issues);
+    }
+
     const filters = {
       companyId,
-      agentId: req.query.agentId as string | undefined,
-      entityType: req.query.entityType as string | undefined,
-      entityId: req.query.entityId as string | undefined,
-      limit: normalizeActivityLimit(Number(req.query.limit)),
+      agentId: parsed.data.agentId,
+      entityType: parsed.data.entityType,
+      entityId: parsed.data.entityId,
+      limit: normalizeActivityLimit(parsed.data.limit),
     };
     const result = await svc.list(filters);
     res.json(result);

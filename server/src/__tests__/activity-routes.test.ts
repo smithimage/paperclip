@@ -240,6 +240,26 @@ describe.sequential("activity routes", () => {
     });
   });
 
+  it("rejects unknown query params on company activity list with 400", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/companies/company-1/activity?after=2030-01-01T00%3A00%3A00.000Z"),
+    );
+
+    expect(res.status).toBe(400);
+    expect(mockActivityService.list).not.toHaveBeenCalled();
+  });
+
+  it("rejects arbitrary unknown query params on company activity list with 400", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/companies/company-1/activity?nonsenseParam=zzz"),
+    );
+
+    expect(res.status).toBe(400);
+    expect(mockActivityService.list).not.toHaveBeenCalled();
+  });
+
   it("resolves alphanumeric issue identifiers before loading runs", async () => {
     mockIssueService.getByIdentifier.mockResolvedValue({
       id: "issue-uuid-1",

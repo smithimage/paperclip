@@ -232,7 +232,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     issueId: z.string().uuid().optional(),
     limit: z.string().optional(),
     offset: z.string().optional(),
-  }).passthrough();
+  }).strict();
 
   function assertImportTargetAccess(
     req: Request,
