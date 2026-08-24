@@ -55,6 +55,16 @@ const DEFAULT_JOB_TIMEOUT_MS = 5 * 60 * 1_000;
 /** Maximum number of concurrent job executions across all plugins. */
 const DEFAULT_MAX_CONCURRENT_JOBS = 10;
 
+/**
+ * How long a tick must be in-progress before it is considered stuck and
+ * force-reset. Any `await` inside `tick()` that hangs without settling will
+ * hold `tickInProgress = true` indefinitely, preventing all future ticks.
+ * This threshold must exceed the longest *legitimate* tick: concurrent jobs
+ * each time out after `jobTimeoutMs`, so the worst case is one job timeout.
+ * Default: 2× `DEFAULT_JOB_TIMEOUT_MS` (10 min).
+ */
+const DEFAULT_TICK_STUCK_THRESHOLD_MS = 2 * DEFAULT_JOB_TIMEOUT_MS;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -75,6 +85,13 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /**
+   * How long a tick may be in-progress before it is force-reset (ms).
+   * A tick that hangs past this threshold has a stuck `await` and will never
+   * complete on its own — resetting it unblocks future ticks.
+   * Default: 2× `jobTimeoutMs` (10 min).
+   */
+  stuckTickThresholdMs?: number;
 }
 
 /**
@@ -101,6 +118,11 @@ export interface SchedulerDiagnostics {
   tickCount: number;
   /** Timestamp of the last tick (ISO 8601). */
   lastTickAt: string | null;
+  /**
+   * ISO 8601 timestamp when the current stuck tick started, or null if no
+   * tick is in-progress or the in-progress tick is within the normal window.
+   */
+  tickStuckSince: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +232,7 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    stuckTickThresholdMs = DEFAULT_TICK_STUCK_THRESHOLD_MS,
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
@@ -236,6 +259,13 @@ export function createPluginJobScheduler(
   /** Guard against concurrent tick execution. */
   let tickInProgress = false;
 
+  /**
+   * Epoch ms when `tickInProgress` was last set to `true`, or null when
+   * the tick is not in progress. Used to detect a stuck tick whose awaited
+   * promises never settle — see `stuckTickThresholdMs`.
+   */
+  let tickStuckAt: number | null = null;
+
   // -----------------------------------------------------------------------
   // Core: tick
   // -----------------------------------------------------------------------
@@ -251,6 +281,7 @@ export function createPluginJobScheduler(
     }
 
     tickInProgress = true;
+    tickStuckAt = Date.now();
     tickCount++;
     lastTickAt = new Date();
 
@@ -329,6 +360,7 @@ export function createPluginJobScheduler(
       );
     } finally {
       tickInProgress = false;
+      tickStuckAt = null;
     }
   }
 
@@ -696,6 +728,22 @@ export function createPluginJobScheduler(
 
     running = true;
     tickTimer = setInterval(() => {
+      // Stuck-tick safety valve: if a previous tick's awaited promise never
+      // settled, `tickInProgress` stays true forever and all future ticks
+      // silently no-op. Force-reset after `stuckTickThresholdMs` so the
+      // scheduler can continue dispatching jobs.
+      if (tickInProgress && tickStuckAt !== null) {
+        const stuckForMs = Date.now() - tickStuckAt;
+        if (stuckForMs > stuckTickThresholdMs) {
+          log.error(
+            { stuckForMs, stuckTickThresholdMs },
+            "scheduler tick is stuck (an awaited promise never settled) — " +
+              "force-resetting tickInProgress to unblock future ticks",
+          );
+          tickInProgress = false;
+          tickStuckAt = null;
+        }
+      }
       void tick();
     }, tickIntervalMs);
 
@@ -733,6 +781,10 @@ export function createPluginJobScheduler(
       activeJobIds: [...activeJobs],
       tickCount,
       lastTickAt: lastTickAt?.toISOString() ?? null,
+      tickStuckSince:
+        tickInProgress && tickStuckAt !== null
+          ? new Date(tickStuckAt).toISOString()
+          : null,
     };
   }
 
