@@ -1705,9 +1705,20 @@ export async function startServer(): Promise<StartedServer> {
               logger.error({ err }, "periodic heartbeat recovery failed");
             }));
         }
-      })().catch((err) => {
-        logger.error({ err }, "heartbeat scheduler tick failed");
-      }));
+      })()
+        .catch((err) => {
+          logger.error({ err }, "heartbeat scheduler tick failed");
+        })
+        .finally(() => {
+          // Reaching here means this tick's promise chain settled — the
+          // scheduler event loop is not wedged. A hang inside the tick body
+          // (e.g. a stuck DB query with no timeout) prevents this from firing,
+          // which is exactly what WatchdogUSec on the unit is meant to catch.
+          // The HTTP server staying responsive is not sufficient evidence the
+          // scheduler itself is alive, so this heartbeat is sent from here,
+          // not from a request handler.
+          void systemdNotify(["--watchdog"]);
+        }));
     });
   } else {
     // The heartbeat scheduler is disabled, but the orphan-sandbox cleanup sweep
